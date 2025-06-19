@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:flutter_mjpeg/flutter_mjpeg.dart';
 import 'package:http/http.dart' as http;
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 import 'bluetooth_page.dart';
 
@@ -18,18 +19,40 @@ class AmphibianController extends StatefulWidget {
 }
 
 class _AmphibianControllerState extends State<AmphibianController> {
-  static const String streamUrl = 'http://192.168.1.15:81/stream';
+  static const _remoteView = 'http://193.214.77.234:8009/#view';
+  static const _localStream = 'http://192.168.1.15:81/stream';
+  String streamUrl = _remoteView;
   bool isStreamAvailable = false;
 
   BluetoothDevice? _device;
   BluetoothConnection? _connection;
-
   Timer? _repeatTimer;
 
   @override
   void initState() {
     super.initState();
-    _checkStream();
+    _warmUpAndSwitch();
+    testHead();
+    testRawHttp();
+    checkNetwork();
+  }
+
+  Future<void> _warmUpAndSwitch() async {
+    // 1) First try the remote view to activate the stream
+    try {
+      await http.get(Uri.parse(_remoteView))
+          .timeout(const Duration(seconds: 3));
+      debugPrint('Remote view activated');
+    } catch (e) {
+      debugPrint('Remote view activation failed: $e');
+    }
+
+    // 2) Switch to local stream after a brief delay
+    await Future.delayed(const Duration(seconds: 10));
+    setState(() => streamUrl = _localStream);
+    debugPrint('Local view activated');
+    // 3) Verify the local stream
+
   }
 
   @override
@@ -42,11 +65,59 @@ class _AmphibianControllerState extends State<AmphibianController> {
   Future<void> _checkStream() async {
     try {
       final resp = await http
-          .head(Uri.parse(streamUrl))
+          .get(
+            Uri.parse(streamUrl),
+            headers: {'Range': 'bytes=0-10'}
+          )
           .timeout(const Duration(seconds: 5));
-      setState(() => isStreamAvailable = resp.statusCode == 200);
+
+      setState(() => isStreamAvailable =
+          (resp.statusCode == 200 || resp.statusCode == 206));
     } catch (_) {
       setState(() => isStreamAvailable = false);
+    }
+  }
+
+  Future<void> testHead() async {
+    try {
+      final res = await http
+        .head(Uri.parse(_remoteView))
+        .timeout(const Duration(seconds: 5));
+      debugPrint('🟢 HEAD status: ${res.statusCode}');
+    } catch (e) {
+      debugPrint('🔴 HEAD error: $e');
+    }
+  }
+
+  Future<void> testRawHttp() async {
+    try {
+      final resp = await http
+        .get(
+          Uri.parse(_remoteView),
+          headers: {'Range': 'bytes=0-20'},
+        )
+        .timeout(const Duration(seconds: 5));
+      debugPrint('🟢 HTTP STATUS: ${resp.statusCode}');
+      debugPrint('🟢 BYTES: ${resp.bodyBytes.take(10).toList()}');
+    } catch (e) {
+      debugPrint('🔴 HTTP ERROR: $e');
+    }
+  }
+
+  Future<void> checkNetwork() async {
+    final conn = await Connectivity().checkConnectivity();
+    switch (conn) {
+      case ConnectivityResult.wifi:
+        debugPrint('✅ Connected over Wi-Fi');
+        break;
+      case ConnectivityResult.mobile:
+        debugPrint('⚠️ Connected over Mobile Data');
+        break;
+      case ConnectivityResult.none:
+        debugPrint('❌ No network connection');
+        break;
+      default:
+        debugPrint('🔍 Unknown connectivity status');
     }
   }
 
@@ -108,7 +179,7 @@ class _AmphibianControllerState extends State<AmphibianController> {
         width: 60,
         height: 60,
         child: ElevatedButton(
-          onPressed: () {}, // tap is handled by GestureDetector
+          onPressed: () {},
           style: ElevatedButton.styleFrom(
             shape: const CircleBorder(),
             backgroundColor: Colors.blueGrey,
@@ -121,27 +192,29 @@ class _AmphibianControllerState extends State<AmphibianController> {
   }
 
   Widget _buildStatusBar() {
-    final status = (_connection?.isConnected == true) ? 'Connected' : 'Ready';
+    final isConnected = _connection?.isConnected == true;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.grey[800],
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade600, width: 2),
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          const Icon(Icons.info_outline, color: Colors.white54, size: 16),
+          Tooltip(
+            message: isConnected 
+                ? 'Connected to ${_device?.name ?? _device?.address}' 
+                : 'Disconnected',
+            child: Icon(
+              Icons.bluetooth,
+              color: isConnected ? Colors.blue : Colors.grey,
+              size: 24,
+            ),
+          ),
           const SizedBox(width: 8),
-          const Text('Status: ', style: TextStyle(color: Colors.white54)),
-          Text(status, style: const TextStyle(color: Colors.white)),
-          const SizedBox(width: 8),
-          Expanded(
-            child: LinearProgressIndicator(
-              value: _connection?.isConnected == true ? 1.0 : 0.0,
-              backgroundColor: Colors.grey[600],
-              color: Colors.blue,
-              minHeight: 8,
+          Tooltip(
+            message: isStreamAvailable ? 'Stream available' : 'Stream unavailable',
+            child: Icon(
+              Icons.videocam,
+              color: isStreamAvailable ? Colors.green : Colors.grey,
+              size: 24,
             ),
           ),
         ],
@@ -166,8 +239,7 @@ class _AmphibianControllerState extends State<AmphibianController> {
       ),
       body: Padding(
         padding: const EdgeInsets.all(20),
-        child:
-            isLandscape ? _buildLandscapeLayout() : _buildPortraitLayout(),
+        child: isLandscape ? _buildLandscapeLayout() : _buildPortraitLayout(),
       ),
     );
   }
@@ -177,7 +249,6 @@ class _AmphibianControllerState extends State<AmphibianController> {
       children: [
         _buildStatusBar(),
         const SizedBox(height: 20),
-        // Camera Feed
         Container(
           height: 200,
           width: double.infinity,
@@ -219,7 +290,6 @@ class _AmphibianControllerState extends State<AmphibianController> {
                 ),
         ),
         const SizedBox(height: 40),
-        // Control pad
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -236,14 +306,29 @@ class _AmphibianControllerState extends State<AmphibianController> {
                 holdableButton(Icons.arrow_drop_down, 'B'),
               ],
             ),
-            ElevatedButton(
-              onPressed: () => sendToArduino('S'),
-              style: ElevatedButton.styleFrom(
-                shape: const CircleBorder(),
-                backgroundColor: Colors.orange,
-                padding: const EdgeInsets.all(24),
-              ),
-              child: const Icon(Icons.construction, size: 32),
+            Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton(
+                  onPressed: () => sendToArduino('U'),
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    backgroundColor: Colors.green,
+                    padding: const EdgeInsets.all(20),
+                  ),
+                  child: const Icon(Icons.arrow_upward, size: 30),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () => sendToArduino('D'),
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    backgroundColor: Colors.red,
+                    padding: const EdgeInsets.all(20),
+                  ),
+                  child: const Icon(Icons.arrow_downward, size: 30),
+                ),
+              ],
             ),
           ],
         ),
@@ -279,8 +364,7 @@ class _AmphibianControllerState extends State<AmphibianController> {
                 child: Container(
                   decoration: BoxDecoration(
                     color: Colors.black,
-                    border:
-                        Border.all(color: Colors.grey.shade600, width: 4),
+                    border: Border.all(color: Colors.grey.shade600, width: 4),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: isStreamAvailable
@@ -317,14 +401,29 @@ class _AmphibianControllerState extends State<AmphibianController> {
                 ),
               ),
               const SizedBox(width: 20),
-              ElevatedButton(
-                onPressed: () => sendToArduino('S'),
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  backgroundColor: Colors.orange,
-                  padding: const EdgeInsets.all(24),
-                ),
-                child: const Icon(Icons.construction, size: 32),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ElevatedButton(
+                    onPressed: () => sendToArduino('U'),
+                    style: ElevatedButton.styleFrom(
+                      shape: const CircleBorder(),
+                      backgroundColor: Colors.green,
+                      padding: const EdgeInsets.all(20),
+                    ),
+                    child: const Icon(Icons.arrow_upward, size: 30),
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () => sendToArduino('D'),
+                    style: ElevatedButton.styleFrom(
+                      shape: const CircleBorder(),
+                      backgroundColor: Colors.red,
+                      padding: const EdgeInsets.all(20),
+                    ),
+                    child: const Icon(Icons.arrow_downward, size: 30),
+                  ),
+                ],
               ),
             ],
           ),
